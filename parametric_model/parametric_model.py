@@ -7,6 +7,8 @@ from  jaxtyping import PyTree,Array
 from core.types import SampleArray,TimeArray,VelocityArray,TrajectoryArray
 from architectures.node import NeuralODE
 from architectures.architectures import MLP,ResNet
+
+
 class ParametricModel(nnx.Module):
     """
     General class for parametric models in neural optimal transport.
