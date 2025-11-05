@@ -336,3 +336,149 @@ def run_hamiltonian_flow(parametric_model: nnx.Module,
         }
     }
 
+def hamiltonian_trajectory(parametric_model: nnx.Module, 
+                          batch_size: int,
+                          test_data_set: Array, 
+                          G_mat: G_matrix,
+                          potential: Potential, 
+                          initial_momentum: PyTree,
+                          h: float = 0.01, 
+                          solver: str = "cg",
+                          max_iterations: int = 100,
+                          regularization: float = 1e-6,
+                          gamma: float = 1e-2,
+                          n_iters: int = 3,
+                          solver_tol: float = 1e-6,
+                          solver_maxiter: int = 50) -> dict:
+    """
+    Run Hamiltonian flow and return full trajectories of parameters and momenta.
+    
+    Uses the Hamiltonian system equations directly:
+        θ̇(t) = G(θ(t))^{-1} p(t)
+        ṗ(t) = ½ ∇_θ(η^T G(θ) η) - ∇_θ F(θ)  where η = G^{-1} p
+    
+    Args:
+        parametric_model: Initial Neural ODE model
+        batch_size: Number of samples for Monte Carlo estimation
+        test_data_set: Test dataset for evaluation
+        G_mat: G-matrix object for linear system solving
+        potential: Potential instance defining the energy functional
+        initial_momentum: Initial momentum PyTree p₀
+        h: Time step size
+        solver: Linear solver type ("minres", "cg")
+        max_iterations: Maximum number of Hamiltonian flow steps
+        regularization: Regularization parameter for linear solvers
+        gamma: Step size for fixed point iteration
+        n_iters: Number of fixed point iterations per step
+        solver_tol: Tolerance for linear solver
+        solver_maxiter: Maximum iterations for linear solver
+        
+    Returns:
+        trajectories: Dictionary containing:
+            - 'theta_history': List of parameter PyTrees [θ₀, θ₁, ..., θₙ]
+            - 'momentum_history': List of momentum PyTrees [p₀, p₁, ..., pₙ]
+            - 'theta_dot_history': List of parameter velocities [θ̇₀, θ̇₁, ..., θ̇ₙ]
+            - 'p_dot_history': List of momentum velocities [ṗ₀, ṗ₁, ..., ṗₙ]
+            - 'time_steps': Array of time points [0, h, 2h, ..., nh]
+            - 'energy_history': List of potential energies F(θ)
+            - 'hamiltonian_history': Array of Hamiltonian values
+            - 'final_parametric_model': Final ParametricModel
+            - 'final_momentum': Final momentum PyTree
+    """
+    # Initialize key for sample generation
+    key = jax.random.PRNGKey(0)
+    key, subkey = jax.random.split(key)
+    problem_dim = test_data_set.shape[1]
+    z_samples = jax.random.normal(subkey, (batch_size, problem_dim))
+    
+    # Initialize
+    current_parametric_model = parametric_model
+    current_momentum = initial_momentum
+    
+    # Storage for trajectories
+    theta_history = []
+    momentum_history = []
+    theta_dot_history = []
+    p_dot_history = []
+    energy_history = []
+    hamiltonian_history = []
+    
+    # Store initial conditions
+    _, theta_0 = nnx.split(current_parametric_model)
+    theta_history.append(theta_0)
+    momentum_history.append(current_momentum)
+    
+    # Compute initial θ̇₀ = G(θ₀)^{-1} p₀
+    theta_dot_0, _ = G_mat.solve_system(z_samples, current_momentum, params=theta_0,
+                                        tol=solver_tol, maxiter=solver_maxiter, 
+                                        method=solver, regularization=regularization)
+    theta_dot_history.append(theta_dot_0)
+    
+    # Compute initial ṗ₀ = ½ ∇_θ(η^T G η) - ∇_θ F
+    grad_g_mat_0 = G_mat.metric_derivative_quadratic_form(z_samples, theta_dot_0, params=theta_0)
+    graphdef, _ = nnx.split(current_parametric_model)
+    temp_model_0 = nnx.merge(graphdef, theta_0)
+    grad_F_0 = jax.grad(lambda theta: potential.evaluate_energy(
+        nnx.merge(graphdef, theta), test_data_set, theta)[0])(theta_0)
+    p_dot_0 = jax.tree.map(lambda g_G, g_F: 0.5 * g_G - g_F, grad_g_mat_0, grad_F_0)
+    p_dot_history.append(p_dot_0)
+    
+    # Compute initial Hamiltonian and energy
+    initial_hamiltonian = compute_hamiltonian(theta_0, current_momentum, test_data_set, G_mat, potential)
+    hamiltonian_history.append(initial_hamiltonian.astype(float))
+    initial_energy, _, _, _, _ = potential.evaluate_energy(temp_model_0, test_data_set, theta_0)
+    energy_history.append(initial_energy.astype(float))
+    
+    # Main integration loop
+    for iteration in range(max_iterations - 1):
+        # Generate fresh samples
+        key, subkey = jax.random.split(key)
+        z_samples_eval = jax.random.normal(subkey, (batch_size, problem_dim))
+        
+        # Take Hamiltonian step with derivatives
+        current_parametric_model, current_momentum, step_info, theta_dot, p_dot = hamiltonian_flow_step(
+            parametric_model=current_parametric_model, 
+            p_n=current_momentum, 
+            z_samples=z_samples_eval, 
+            G_mat=G_mat, 
+            potential=potential,
+            step_size=h, 
+            solver=solver,
+            solver_tol=solver_tol,
+            solver_maxiter=solver_maxiter,
+            regularization=regularization,
+            gamma=gamma,
+            n_iters=n_iters,
+            return_derivatives=True  # Get θ̇ and ṗ
+        )
+        
+        # Get current state
+        _, current_params = nnx.split(current_parametric_model)
+        
+        # Store trajectories
+        theta_history.append(current_params)
+        momentum_history.append(current_momentum)
+        theta_dot_history.append(theta_dot)
+        p_dot_history.append(p_dot)
+        energy_history.append(step_info['energy'].astype(float))
+        
+        # Compute current Hamiltonian
+        current_hamiltonian = compute_hamiltonian(current_params, current_momentum, 
+                                                  test_data_set, G_mat, potential)
+        hamiltonian_history.append(current_hamiltonian.astype(float))
+    
+    # Create time steps array
+    time_steps = jnp.arange(max_iterations) * h
+    
+    return {
+        'theta_history': theta_history,
+        'momentum_history': momentum_history,
+        'theta_dot_history': theta_dot_history,
+        'p_dot_history': p_dot_history,
+        'time_steps': time_steps,
+        'energy_history': energy_history,
+        'hamiltonian_history': jnp.array(hamiltonian_history),
+        'final_parametric_model': current_parametric_model,
+        'final_momentum': current_momentum
+    }
+
