@@ -41,3 +41,21 @@ def guassian_wasserstein_squared_distance(theta: Array, sigma: Array)-> float:
 
     return trace_term
 
+def monge_map(samples: Array, sigma_target: Array) -> Array:
+    '''
+    Compute the Monge from samples to the target Gaussian. As rho_0 = I, then the Monge map is given by:
+        T(x) = A x, with A = (sigma_target)^{1/2}
+    
+    Args:
+        samples: (N, d) array of samples from the source distribution
+        sigma_target: (d, d) covariance matrix of the target Gaussian
+    Outputs:
+        mapped_samples: (N, d) array of samples mapped to the target Gaussian
+    '''
+    # Compute the matrix A = (sigma_target)^{1/2}
+    eigvals,eigvec = jnp.linalg.eigh(sigma_target)
+    A = eigvec @ jnp.diag(jnp.sqrt(eigvals))@eigvec.T
+    # Apply the linear map
+    y = samples @ A.T
+    return y
+
