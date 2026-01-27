@@ -86,7 +86,6 @@ def hamiltonian_flow_step(parametric_model: ParametricModel, p_n: PyTree, z_samp
     p_dot = jax.tree.map(lambda g_G, g_F: 0.5 * g_G - g_F, grad_g_mat, grad_F)
     p_np1 = jax.tree.map(lambda p, dp: p + step_size * dp, p_n, p_dot)
     
-    # [rest of existing code for step_info, energy computation, etc.]
     energy_grad,energy,energy_breakdown = potential.compute_energy_gradient(parametric_model=parametric_model,z_samples=z_samples, params=alpha)
     updated_parametric_model = nnx.merge(graph_def, alpha)
 
